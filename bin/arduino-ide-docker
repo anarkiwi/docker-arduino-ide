@@ -1,0 +1,47 @@
+#!/bin/sh
+# Run Arduino IDE in a container on the current X11 display, with the current
+# home directory (or ARDUINO_IDE_HOME) mounted at its own path so sketchbook,
+# ~/.arduinoIDE and ~/.arduino15 are the ones already on this machine.
+#   arduino-ide-docker [arduino-ide options...] [sketch...]
+# Sketch paths must be under the mounted home directory.
+set -eu
+
+: "${ARDUINO_IDE_IMAGE:=ghcr.io/anarkiwi/docker-arduino-ide:latest}"
+: "${ARDUINO_IDE_DOCKER:=docker}"
+: "${ARDUINO_IDE_HOME:=${HOME}}"
+
+[ -n "${DISPLAY:-}" ] || { echo "arduino-ide-docker: DISPLAY is not set" >&2; exit 1; }
+
+# Build the docker command in $@, keeping the caller's IDE arguments last:
+# append the docker options, then rotate the caller's arguments to the end.
+args=$#
+set -- "$@" run --rm -i \
+  -u "$(id -u):$(id -g)" \
+  -e "DISPLAY=${DISPLAY}" \
+  -e "ARDUINO_IDE_HOME=${ARDUINO_IDE_HOME}" \
+  --shm-size=512m \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v "${ARDUINO_IDE_HOME}:${ARDUINO_IDE_HOME}"
+
+# Serial boards, and the groups that own them; a GPU if the host has one.
+for dev in /dev/ttyACM* /dev/ttyUSB* ${ARDUINO_IDE_EXTRA_DEVICES:-}; do
+  [ -c "${dev}" ] || continue
+  set -- "$@" --device "${dev}" --group-add "$(stat -c %g "${dev}")"
+done
+[ -d /dev/dri ] && set -- "$@" --device /dev/dri
+if [ -n "${XAUTHORITY:-}" ] && [ -r "${XAUTHORITY}" ]; then
+  set -- "$@" -e XAUTHORITY=/tmp/.docker.xauth \
+    -v "${XAUTHORITY}:/tmp/.docker.xauth:ro"
+fi
+
+# shellcheck disable=SC2086 # ARDUINO_IDE_DOCKER_OPTS is intentionally word split.
+set -- "$@" ${ARDUINO_IDE_DOCKER_OPTS:-} "${ARDUINO_IDE_IMAGE}" arduino-ide
+
+while [ "${args}" -gt 0 ]; do
+  arg=$1
+  shift
+  set -- "$@" "${arg}"
+  args=$((args - 1))
+done
+
+exec "${ARDUINO_IDE_DOCKER}" "$@"

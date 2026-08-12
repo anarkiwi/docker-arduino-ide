@@ -1,0 +1,78 @@
+name: upstream-bump
+
+on:
+  schedule:
+    - cron: '41 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check upstream release
+        id: up
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # releases/latest skips prereleases, so the nightly and RC builds
+          # upstream also publishes are ignored. The asset digest comes from the
+          # API, so the 200MB zip is not downloaded here.
+          release=$(gh api repos/arduino/arduino-ide/releases/latest)
+          version=$(printf '%s' "${release}" | jq -r .tag_name)
+          sha=$(printf '%s' "${release}" \
+            | jq -r --arg name "arduino-ide_${version}_Linux_64bit.zip" \
+              '.assets[] | select(.name == $name) | .digest' \
+            | sed 's/^sha256://')
+          case "${version}${sha}" in
+            *null*|"") echo "cannot resolve the arduino-ide release" >&2; exit 1;;
+          esac
+          current=$(sed -n 's/^ARG ARDUINO_IDE_VERSION=//p' Dockerfile)
+          [ "${version}" = "${current}" ] && changed=false || changed=true
+          sed -i \
+            -e "s|^ARG ARDUINO_IDE_VERSION=.*|ARG ARDUINO_IDE_VERSION=${version}|" \
+            -e "s|^ARG ARDUINO_IDE_SHA256=.*|ARG ARDUINO_IDE_SHA256=${sha}|" Dockerfile
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+
+      # PRs opened with GITHUB_TOKEN do not start workflow runs, so the new pin
+      # is built and tested here instead of on the pull request.
+      - uses: docker/setup-buildx-action@v4
+        if: steps.up.outputs.changed == 'true'
+
+      - name: build
+        if: steps.up.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: arduino-ide:bump
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: smoke test
+        if: steps.up.outputs.changed == 'true'
+        run: tests/smoke.sh arduino-ide:bump ${{ steps.up.outputs.version }}
+
+      - name: open pull request
+        if: steps.up.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: arduino-ide-${{ steps.up.outputs.version }}
+          commit-message: "Arduino IDE ${{ steps.up.outputs.version }}"
+          title: "Arduino IDE ${{ steps.up.outputs.version }}"
+          body: |
+            Pin Arduino IDE
+            [${{ steps.up.outputs.version }}](https://github.com/arduino/arduino-ide/releases/tag/${{ steps.up.outputs.version }}).
+
+            Built and smoke tested in
+            [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }});
+            `ci` does not run on pull requests opened by `GITHUB_TOKEN`.
+
+            Merging releases an image versioned after this release.
+          delete-branch: true

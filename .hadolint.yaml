@@ -1,0 +1,6 @@
+ignored:
+  # Debian package versions are not pinned; the base image tag is.
+  - DL3008
+  # USER is a name on purpose: a numeric USER gets no supplementary groups, and
+  # dialout membership is what opens a passed in serial device.
+  - DL3066
